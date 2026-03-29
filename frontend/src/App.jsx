@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import ErrorBoundary from './components/ErrorBoundary'
+import LoginScreen from './components/LoginScreen'
 import Spinner from './components/Spinner'
 import TournamentTab from './components/tabs/TournamentTab'
 import MatchTab from './components/tabs/MatchTab'
 import PlayersTab from './components/tabs/PlayersTab'
 import PredictionsTab from './components/tabs/PredictionsTab'
-import { getCompetitions, getFixtures } from './api/client'
+import { getCompetitions, getFixtures, checkAuth, logout } from './api/client'
 
 const TABS = [
   { key: 'tournament', icon: '🏆', label: 'Tournament' },
@@ -15,6 +16,8 @@ const TABS = [
 ]
 
 export default function App() {
+  const [user,          setUser]          = useState(null)
+  const [authChecked,   setAuthChecked]   = useState(false)
   const [activeTab,     setActiveTab]     = useState('tournament')
   const [competitionId, setCompetitionId] = useState(null)
   const [fixtureId,     setFixtureId]     = useState(null)
@@ -26,13 +29,22 @@ export default function App() {
   const [compError,         setCompError]         = useState(null)
   const [fixtureError,      setFixtureError]      = useState(null)
 
-  // Load competitions on mount
+  // Check session on mount
   useEffect(() => {
+    checkAuth()
+      .then(data => setUser(data.email))
+      .catch(() => setUser(null))
+      .finally(() => setAuthChecked(true))
+  }, [])
+
+  // Load competitions once authenticated
+  useEffect(() => {
+    if (!user) return
     setLoadingComps(true)
     getCompetitions()
       .then(data => { setCompetitions(data); setLoadingComps(false) })
       .catch(err  => { setCompError(err.message); setLoadingComps(false) })
-  }, [])
+  }, [user])
 
   // Load fixtures when competition changes
   useEffect(() => {
@@ -95,6 +107,18 @@ export default function App() {
     </>
   )
 
+  async function handleLogout() {
+    await logout()
+    setUser(null)
+    setCompetitions([])
+    setFixtures([])
+    setCompetitionId(null)
+    setFixtureId(null)
+  }
+
+  if (!authChecked) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}><Spinner /></div>
+  if (!user) return <LoginScreen onLogin={email => setUser(email)} />
+
   return (
     <ErrorBoundary>
       {/* ── HEADER ── */}
@@ -125,6 +149,7 @@ export default function App() {
           <div className="header-meta">
             <span className="snap-time">{new Date().toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
             <span className="mode-badge">LIVE</span>
+            <button onClick={handleLogout} style={{ marginLeft: 8, padding: '4px 10px', fontSize: 11, background: 'var(--bg3)', border: '1px solid var(--border)', borderRadius: 'var(--r)', color: 'var(--dim)', cursor: 'pointer' }}>Logout</button>
           </div>
         </div>
 

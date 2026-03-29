@@ -21,14 +21,16 @@ CORS:
 
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from jose import jwt, JWTError
+from pydantic import BaseModel
 from pymongo.errors import ServerSelectionTimeoutError
 
 FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
@@ -37,6 +39,7 @@ from config import (
     COL_COMPETITIONS, COL_FIXTURES, COL_PLAYER_ODDS,
     COL_SEASONS, COL_TEAMS, COL_PLAYERS, COL_PREDICTIONS,
     API_HOST, API_PORT,
+    AUTH_EMAIL, AUTH_PASSWORD, JWT_SECRET,
 )
 from db import get_db, ensure_indexes
 
@@ -70,9 +73,76 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_methods=["GET"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+# ═══════════════════════════════════════════════
+#  AUTH
+# ═══════════════════════════════════════════════
+
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_DAYS = 7
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+def get_current_user(request: Request):
+    """Dependency — extracts and validates the session cookie."""
+    token = request.cookies.get("session")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload["email"]
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+
+@app.post("/auth/login", summary="Log in with email and password")
+def auth_login(body: LoginRequest):
+    if body.email != AUTH_EMAIL or body.password != AUTH_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = jwt.encode(
+        {"email": body.email, "exp": datetime.now(tz=timezone.utc) + timedelta(days=JWT_EXPIRY_DAYS)},
+        JWT_SECRET,
+        algorithm=JWT_ALGORITHM,
+    )
+    response = JSONResponse(content={"ok": True, "email": body.email})
+    response.set_cookie(
+        key="session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=JWT_EXPIRY_DAYS * 86400,
+        path="/",
+    )
+    return response
+
+
+@app.post("/auth/logout", summary="Log out")
+def auth_logout():
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie(key="session", path="/")
+    return response
+
+
+@app.get("/auth/me", summary="Check current session")
+def auth_me(request: Request):
+    token = request.cookies.get("session")
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"email": payload["email"]}
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid session")
 
 
 # ═══════════════════════════════════════════════
@@ -108,7 +178,7 @@ def _runner_response(r: Dict) -> Dict:
 # ═══════════════════════════════════════════════
 
 @app.get("/api/competitions", summary="List all competitions")
-def get_competitions() -> List[Dict]:
+def get_competitions(_user: str = Depends(get_current_user)) -> List[Dict]:
     """
     Returns all competitions with fixture count.
     Response: [ { competitionId, name, fixtureCount } ]
@@ -137,7 +207,7 @@ def get_competitions() -> List[Dict]:
 
 
 @app.get("/api/fixtures", summary="List fixtures for a competition")
-def get_fixtures(competition_id: int = Query(..., description="Competition ID")) -> List[Dict]:
+def get_fixtures(competition_id: int = Query(..., description="Competition ID"), _user: str = Depends(get_current_user)) -> List[Dict]:
     """
     Returns all fixtures for a competition, sorted by matchDate ascending.
     Response: [ { fixtureId, name, homeTeam, awayTeam, matchDate } ]
@@ -164,7 +234,7 @@ def get_fixtures(competition_id: int = Query(..., description="Competition ID"))
 
 
 @app.get("/api/tournament-odds", summary="Tournament odds for a competition")
-def get_tournament_odds(competition_id: int = Query(..., description="Competition ID")) -> Dict:
+def get_tournament_odds(competition_id: int = Query(..., description="Competition ID"), _user: str = Depends(get_current_user)) -> Dict:
     """
     Returns champion, runnerUp, topScorer odds for a competition.
     runnerUpNote explains the TO_REACH_THE_FINAL proxy.
@@ -208,7 +278,7 @@ def get_tournament_odds(competition_id: int = Query(..., description="Competitio
 
 
 @app.get("/api/match-odds", summary="Win/Draw/Win and Correct Score for a fixture")
-def get_match_odds(fixture_id: int = Query(..., description="Fixture (event) ID")) -> Dict:
+def get_match_odds(fixture_id: int = Query(..., description="Fixture (event) ID"), _user: str = Depends(get_current_user)) -> Dict:
     """
     Returns WDW and Correct Score odds for a single fixture.
     All probabilities are normalised (bookmaker margin removed).
@@ -262,7 +332,7 @@ def get_match_odds(fixture_id: int = Query(..., description="Fixture (event) ID"
 
 
 @app.get("/api/player-odds", summary="Player market odds for a fixture")
-def get_player_odds(fixture_id: int = Query(..., description="Fixture (event) ID")) -> List[Dict]:
+def get_player_odds(fixture_id: int = Query(..., description="Fixture (event) ID"), _user: str = Depends(get_current_user)) -> List[Dict]:
     """
     Returns all player market odds for a fixture.
     Player binary markets use raw probability (not normalised).
@@ -288,7 +358,7 @@ def get_player_odds(fixture_id: int = Query(..., description="Fixture (event) ID
 
 
 @app.get("/api/predictions", summary="Derived predictions for a fixture")
-def get_predictions(fixture_id: int = Query(..., description="Fixture (event) ID")) -> Dict:
+def get_predictions(fixture_id: int = Query(..., description="Fixture (event) ID"), _user: str = Depends(get_current_user)) -> Dict:
     """
     Returns computed predictions for a fixture.
     All predictions carry 'source' and 'method' fields:
@@ -327,7 +397,7 @@ def get_predictions(fixture_id: int = Query(..., description="Fixture (event) ID
 
 
 @app.get("/api/registry/teams", summary="Internal team registry")
-def get_teams() -> List[Dict]:
+def get_teams(_user: str = Depends(get_current_user)) -> List[Dict]:
     """All teams with their sportinerdTeamId and goalserveId slot."""
     db = get_db()
     docs = list(db[COL_TEAMS].find({}, {"_id": 0}).sort("name", 1))
@@ -335,7 +405,7 @@ def get_teams() -> List[Dict]:
 
 
 @app.get("/api/registry/players", summary="Internal player registry")
-def get_players(name: Optional[str] = Query(None, description="Filter by name (partial match)")) -> List[Dict]:
+def get_players(name: Optional[str] = Query(None, description="Filter by name (partial match)"), _user: str = Depends(get_current_user)) -> List[Dict]:
     """All players with their sportinerdPlayerId and goalserveId slot."""
     db = get_db()
     # Truncate to 200 chars — $text search is injection-safe but unbounded input causes slow queries

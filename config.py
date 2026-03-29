@@ -14,6 +14,11 @@ DB_NAME   = os.getenv("DB_NAME", "fanduel-prediction")
 # FanDuel source file — path to the JSON snapshot to ingest
 FANDUEL_SOURCE = os.getenv("FANDUEL_SOURCE", "")
 
+# Auth — single-user credentials for the internal dashboard
+AUTH_EMAIL    = os.getenv("AUTH_EMAIL", "")
+AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "")
+JWT_SECRET   = os.getenv("JWT_SECRET", "sportinerd-dev-secret-change-me")
+
 # Collection names — existing
 COL_COMPETITIONS  = "competitions"
 COL_FIXTURES      = "fixtures"
